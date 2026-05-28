@@ -1,0 +1,790 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+    <title>SpectraScope | Real-time Audio Analyzer</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0-beta3/css/all.min.css">
+    <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
+    <script src="dsp.js"></script>
+    <style>
+        body { background: #0a0c10; }
+        .card-glass { background: rgba(18, 22, 28, 0.85); backdrop-filter: blur(2px); border: 1px solid rgba(255,255,255,0.08); }
+        canvas { border-radius: 12px; background: #11151c; box-shadow: 0 8px 20px rgba(0,0,0,0.5); }
+        .btn-glow:hover { box-shadow: 0 0 12px rgba(59,130,246,0.5); transition: 0.2s; }
+        .spectro-canvas { background: #000000; image-rendering: pixelated; width: 100%; height: 240px; border-radius: 12px; }
+        .progress-bar-bg { background: rgba(255,255,255,0.08); border-radius: 999px; height: 8px; overflow: hidden; }
+        .progress-bar-fill { background: linear-gradient(90deg, #3b82f6, #8b5cf6); height: 100%; border-radius: 999px; transition: width 0.3s ease; }
+        .btn-csv { transition: all 0.2s ease; }
+        .btn-csv:hover:not(:disabled) { box-shadow: 0 0 14px rgba(16,185,129,0.5); transform: translateY(-1px); }
+        .btn-csv:disabled { opacity: 0.5; cursor: not-allowed; }
+        .status-badge { transition: all 0.2s; }
+        /* Waveform canvas wrapper */
+        .wave-wrap { position: relative; }
+        .wave-hud {
+            position: absolute; top: 6px; left: 10px; right: 10px;
+            display: flex; gap: 10px; align-items: center; pointer-events: none; z-index: 2;
+        }
+        .wave-hud span {
+            font-size: 10px; font-family: 'Courier New', monospace;
+            background: rgba(0,0,0,0.55); padding: 2px 7px; border-radius: 4px;
+            letter-spacing: 0.04em;
+        }
+        .hud-rms  { color: #34d399; border: 1px solid rgba(52,211,153,0.3); }
+        .hud-peak { color: #facc15; border: 1px solid rgba(250,204,21,0.3); }
+        .hud-clip { color: #f87171; border: 1px solid rgba(248,113,113,0.4); display: none; }
+        /* Peak frequency bar */
+        .peak-bar {
+            display: flex; align-items: center; gap: 8px; margin-top: 6px;
+            font-size: 11px; font-family: 'Courier New', monospace; color: #93c5fd;
+        }
+        .peak-bar i { color: #60a5fa; }
+        #peakFreqDisplay { color: #e0f2fe; font-weight: bold; }
+        #peakDbDisplay   { color: #7dd3fc; }
+    </style>
+</head>
+<body class="text-white font-sans antialiased">
+
+    <div class="max-w-7xl mx-auto px-4 py-6">
+        <!-- Header -->
+        <div class="flex flex-col md:flex-row justify-between items-center mb-8 gap-4">
+            <div class="flex items-center gap-3">
+                <i class="fas fa-wave-square text-3xl text-blue-400"></i>
+                <h1 class="text-3xl font-bold bg-gradient-to-r from-blue-400 to-purple-400 bg-clip-text text-transparent">SpectraScope</h1>
+            </div>
+            <div class="flex items-center gap-2">
+                <span id="modeBadge" class="bg-blue-900 text-blue-200 px-4 py-1 rounded-full text-sm status-badge"><i class="fas fa-microphone-alt mr-1"></i> Initializing...</span>
+            </div>
+        </div>
+
+        <!-- Controls Bar -->
+        <div class="card-glass rounded-2xl p-4 mb-6 flex flex-wrap items-center justify-between gap-4">
+            <!-- Freq Range -->
+            <div class="flex items-center gap-4">
+                <div class="flex gap-2 items-center">
+                    <label class="text-sm text-gray-300">🎚️ Freq Range:</label>
+                    <select id="freqRangeSelect" class="bg-gray-800 border border-gray-600 rounded-lg px-3 py-1 text-sm">
+                        <option value="full">Full Band</option>
+                        <option value="narrowband">📞 Narrowband (300-3400Hz)</option>
+                        <option value="wideband">🎤 Wideband (50-7000Hz)</option>
+                    </select>
+                </div>
+            </div>
+
+            <!-- CSV Save Controls -->
+            <div class="flex items-center gap-3">
+                <button id="csvSaveBtn" class="btn-csv bg-emerald-600 hover:bg-emerald-700 px-5 py-2 rounded-full font-bold shadow text-sm flex items-center gap-2">
+                    <i class="fas fa-file-csv"></i> Save 30s CSV
+                </button>
+                <span id="csvStatus" class="text-sm font-mono bg-black/50 px-3 py-1 rounded-full hidden">0.0 / 30.0 s</span>
+                <div id="csvProgressWrap" class="hidden w-32">
+                    <div class="progress-bar-bg">
+                        <div id="csvProgressBar" class="progress-bar-fill" style="width: 0%"></div>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- Graphs Grid -->
+        <div class="grid grid-cols-1 lg:grid-cols-2 gap-6 mb-6">
+            <div class="card-glass rounded-2xl p-4">
+                <h3 class="text-xl font-semibold mb-2 flex items-center gap-2"><i class="fas fa-chart-line text-blue-400"></i> Frequency Spectrum</h3>
+                <canvas id="fftCanvas" width="600" height="280" style="width:100%; height:280px"></canvas>
+                <div class="peak-bar mt-2">
+                    <i class="fas fa-location-crosshairs"></i>
+                    <span>Peak:</span>
+                    <span id="peakFreqDisplay">— Hz</span>
+                    <span style="color:#4b5563;">|</span>
+                    <span id="peakDbDisplay">— dB</span>
+                </div>
+            </div>
+            <div class="card-glass rounded-2xl p-4">
+                <h3 class="text-xl font-semibold mb-2 flex items-center gap-2"><i class="fas fa-chart-simple text-green-400"></i> 1/1 Octave Bands (dB)</h3>
+                <canvas id="octaveCanvas" width="600" height="280" style="width:100%; height:280px"></canvas>
+            </div>
+        </div>
+
+        <!-- Time Series + Spectrogram -->
+        <div class="grid grid-cols-1 lg:grid-cols-2 gap-6 mb-6">
+            <div class="card-glass rounded-2xl p-4">
+                <h3 class="text-lg font-semibold mb-2"><i class="fas fa-wave-square mr-2 text-yellow-400"></i> Filtered Waveform <span id="filterLabel" class="text-xs text-gray-400">(full band)</span></h3>
+                <div class="wave-wrap">
+                    <div class="wave-hud">
+                        <span class="hud-rms" id="hudRms">RMS — dB</span>
+                        <span class="hud-peak" id="hudPeak">PEAK — dB</span>
+                        <span class="hud-clip" id="hudClip">⚡ CLIP</span>
+                    </div>
+                    <canvas id="waveformCanvas" width="600" height="160" style="width:100%; height:160px; display:block;"></canvas>
+                </div>
+                <p class="text-xs text-gray-400 mt-1">Time-domain signal after bandpass filtering</p>
+            </div>
+            <div class="card-glass rounded-2xl p-4">
+                <h3 class="text-lg font-semibold mb-2"><i class="fas fa-braille mr-2 text-purple-400"></i> Spectrogram (Live)</h3>
+                <canvas id="spectrogramCanvas" width="600" height="240" class="spectro-canvas"></canvas>
+                <p class="text-xs text-gray-400 mt-1">Time vs Frequency heatmap | Updates every 1.2s</p>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        // ============================================================
+        // 1. CSV CAPTURE & UI STATES
+        // ============================================================
+        // CSV capture state
+        let isCsvCapturing = false;
+        let csvBuffer = [];
+        let csvStartTime = 0;
+        let csvTimer = null;
+        const CSV_DURATION = 30;
+        
+        // Charts & UI Globals
+        let fftChart, octaveChart, waveformCanvas, waveformCtx, spectrogramCtx;
+        const freqRangeSelect = document.getElementById('freqRangeSelect');
+        const filterLabel = document.getElementById('filterLabel');
+        const csvSaveBtn = document.getElementById('csvSaveBtn');
+        const csvStatus = document.getElementById('csvStatus');
+        const csvProgressWrap = document.getElementById('csvProgressWrap');
+        const csvProgressBar = document.getElementById('csvProgressBar');
+        const modeBadge = document.getElementById('modeBadge');
+
+        // ── Peak detection state ──
+        let smoothedPeakHz = 0;
+        let smoothedPeakDb = FFT_FLOOR_DB;
+        const PEAK_SMOOTH = 0.8;    // 80% previous, 20% current
+        const PEAK_MIN_DB = -75;    // ignore bins below this threshold
+        // HUD element refs (assigned after DOM is ready, see initUI)
+        let hudRms, hudPeak, hudClip, peakFreqDisplay, peakDbDisplay;
+
+        // ============================================================
+        // 2. SPECTROGRAM DISPLAY (uses DSP helpers)
+        // ============================================================
+        // ── SDR colormap: deep-blue→cyan→green→yellow→orange→red→white ──
+        function spectroColor(norm) {
+            // 7-stop colormap, norm ∈ [0,1]
+            const stops = [
+                [0.000, [  8,   8,  40]],
+                [0.120, [  0,  30, 120]],
+                [0.280, [  0, 180, 220]],
+                [0.460, [  0, 220,  80]],
+                [0.640, [220, 220,   0]],
+                [0.800, [255, 100,   0]],
+                [0.920, [255,  30,  10]],
+                [1.000, [255, 255, 255]]
+            ];
+            // find segment
+            let i = 0;
+            while (i < stops.length - 2 && norm >= stops[i + 1][0]) i++;
+            const [t0, c0] = stops[i];
+            const [t1, c1] = stops[i + 1];
+            const t = Math.max(0, Math.min(1, (norm - t0) / (t1 - t0)));
+            return [
+                Math.round(c0[0] + t * (c1[0] - c0[0])),
+                Math.round(c0[1] + t * (c1[1] - c0[1])),
+                Math.round(c0[2] + t * (c1[2] - c0[2]))
+            ];
+        }
+
+        function updateSpectrogramDisplay() {
+            const ringBufferData = getAudioRingBufferCopy();
+            if (!ringBufferData) return;
+            const { bufferCopy, totalSamples } = ringBufferData;
+            if (totalSamples < SPECTROGRAM_FFT_SIZE) return;
+
+            const { spectrogram, freqs, times } = computeSpectrogramFromBuffer(
+                bufferCopy, totalSamples, FS, SPECTROGRAM_FFT_SIZE, SPECTROGRAM_HOP
+            );
+            if (spectrogram.length === 0) return;
+
+            const canvas = document.getElementById('spectrogramCanvas');
+            const ctx = spectrogramCtx;
+            const w = canvas.width, h = canvas.height;
+            const nFrames = spectrogram.length;
+            const nFreqs = spectrogram[0].length;
+
+            // ── adaptive brightness: find global max/min of this render ──
+            let globalMax = -Infinity, globalMin = Infinity;
+            for (const frame of spectrogram) {
+                for (let i = 0; i < frame.length; i++) {
+                    if (frame[i] > globalMax) globalMax = frame[i];
+                    if (frame[i] < globalMin) globalMin = frame[i];
+                }
+            }
+            // Anchor floor at -90 dB, allow headroom up to 0
+            const dbFloor = Math.max(globalMin, FFT_FLOOR_DB);
+            const dbRange = Math.max(globalMax - dbFloor, 10); // at least 10 dB range
+
+            const imgData = ctx.createImageData(w, h);
+            const data = imgData.data;
+
+            for (let x = 0; x < w; x++) {
+                const frameIdx = Math.min(Math.floor((x / w) * nFrames), nFrames - 1);
+                const frame = spectrogram[frameIdx];
+                for (let y = 0; y < h; y++) {
+                    // Flip y so low freq = bottom, high freq = top
+                    const freqIdx = Math.min(Math.floor(((h - 1 - y) / h) * nFreqs), nFreqs - 1);
+                    const dbVal = frame[freqIdx];
+                    const norm = Math.pow(Math.max(0, Math.min(1, (dbVal - dbFloor) / dbRange)), 0.65);
+                    const [r, g, b] = spectroColor(norm);
+                    const idx = (y * w + x) * 4;
+                    data[idx]     = r;
+                    data[idx + 1] = g;
+                    data[idx + 2] = b;
+                    data[idx + 3] = 255;
+                }
+            }
+            ctx.putImageData(imgData, 0, 0);
+
+            // ── frequency grid overlay ──
+            ctx.save();
+            ctx.strokeStyle = 'rgba(255,255,255,0.12)';
+            ctx.lineWidth = 0.8;
+            ctx.setLineDash([3, 6]);
+            ctx.font = '9px monospace';
+            ctx.fillStyle = 'rgba(255,255,255,0.45)';
+            const maxHz = FS / 2;
+            const gridFreqs = [1000, 2000, 4000, 8000, 12000, 16000].filter(f => f < maxHz);
+            for (const f of gridFreqs) {
+                const yPos = h - Math.round((f / maxHz) * h);
+                ctx.beginPath();
+                ctx.moveTo(0, yPos);
+                ctx.lineTo(w, yPos);
+                ctx.stroke();
+                const label = f >= 1000 ? (f / 1000) + 'k' : f;
+                ctx.fillText(label, 4, yPos - 2);
+            }
+            ctx.restore();
+        }
+        
+        // ============================================================
+        // 3. REALTIME AUDIO PROCESSING (ScriptProcessorNode)
+        // ============================================================
+        let audioContext = null;
+        let mediaStream = null;
+        
+        function processChunk(inputSamples) {
+            const rms = computeRMS(inputSamples);
+            const isSilent = rms < NOISE_GATE_THRESHOLD;
+            
+            // update ring buffer
+            pushToAudioRingBuffer(inputSamples);
+            
+            // CSV capture
+            if (isCsvCapturing) {
+                for (let i = 0; i < inputSamples.length; i++) csvBuffer.push(inputSamples[i]);
+                if (csvBuffer.length >= FS * CSV_DURATION) finishCsvCapture();
+            }
+            
+            // Determine display bin count (capped at 20 kHz)
+            const displayBins = getDisplayBinCount();
+            
+            if (isSilent) {
+                const silentFft = new Array(displayBins).fill(FFT_FLOOR_DB);
+                const silentOctave = { bands: [125,250,500,1000,2000,4000], energies: new Array(6).fill(OCTAVE_FLOOR_DB) };
+                const silentWave = new Array(FFT_SIZE).fill(0);
+                // Decay smoothed FFT toward silence
+                smoothFFT(silentFft);
+                updateCharts(smoothedFFTdB.slice(0, displayBins), silentOctave, silentWave);
+                return;
+            }
+            
+            // DC offset removal
+            const workBuf = new Float64Array(FFT_SIZE);
+            for (let i = 0; i < FFT_SIZE; i++) workBuf[i] = i < inputSamples.length ? inputSamples[i] : 0;
+            let mean = 0;
+            for (let i = 0; i < FFT_SIZE; i++) mean += workBuf[i];
+            mean /= FFT_SIZE;
+            for (let i = 0; i < FFT_SIZE; i++) workBuf[i] -= mean;
+            
+            // Compute FFT magnitude (linear)
+            const magLinear = computeFFTLinear(workBuf, windowHanning, windowSum, FFT_SIZE);
+            
+            // Apply frequency mask for display
+            const maskedMagLinear = new Float64Array(magLinear.length);
+            for (let i = 0; i < magLinear.length; i++) {
+                const freq = i * FS / FFT_SIZE;
+                maskedMagLinear[i] = (freq >= currentLowHz && freq <= currentHighHz) ? magLinear[i] : 0;
+            }
+            
+            // Convert to dB, limit to display bins, and apply smoothing
+            const rawDb = toDb(maskedMagLinear, FFT_FLOOR_DB);
+            const displayDb = rawDb.slice(0, displayBins);
+            const smoothedDisplay = smoothFFT(displayDb);
+            
+            // Octave bands (already relative-normalized in dsp.js)
+            const octaveResult = octaveBands(magLinear, freqBins);
+            
+            // Filtered time-domain waveform
+            const filteredSig = filterSignalFreqDomain(workBuf, currentLowHz, currentHighHz, FS, FFT_SIZE);
+            
+            updateCharts(smoothedDisplay.slice(0, displayBins), octaveResult, filteredSig);
+        }
+        
+        function drawWaveformFromArray(data, ctx, width, height) {
+            if (!data || !data.length) return;
+
+            // ── Compute RMS & peak of this frame ──
+            let sumSq = 0, peakAbs = 0;
+            for (let i = 0; i < data.length; i++) {
+                const a = Math.abs(data[i]);
+                sumSq += data[i] * data[i];
+                if (a > peakAbs) peakAbs = a;
+            }
+            const rmsLin  = Math.sqrt(sumSq / data.length);
+            const rmsDb   = rmsLin  > 1e-9 ? 20 * Math.log10(rmsLin)  : FFT_FLOOR_DB;
+            const peakDb  = peakAbs > 1e-9 ? 20 * Math.log10(peakAbs) : FFT_FLOOR_DB;
+            const isClipping = peakAbs >= 0.95;
+
+            // Update HUD
+            if (hudRms)  hudRms.textContent  = `RMS ${rmsDb.toFixed(1)} dB`;
+            if (hudPeak) hudPeak.textContent  = `PEAK ${peakDb.toFixed(1)} dB`;
+            if (hudClip) hudClip.style.display = isClipping ? 'inline' : 'none';
+
+            ctx.clearRect(0, 0, width, height);
+
+            // ── Subtle grid ──
+            ctx.save();
+            ctx.strokeStyle = 'rgba(255,255,255,0.04)';
+            ctx.lineWidth = 0.8;
+            // Horizontal thirds
+            for (const frac of [0.25, 0.5, 0.75]) {
+                ctx.beginPath();
+                ctx.moveTo(0, Math.round(height * frac));
+                ctx.lineTo(width, Math.round(height * frac));
+                ctx.stroke();
+            }
+            // Vertical quarters
+            for (const frac of [0.25, 0.5, 0.75]) {
+                ctx.beginPath();
+                ctx.moveTo(Math.round(width * frac), 0);
+                ctx.lineTo(Math.round(width * frac), height);
+                ctx.stroke();
+            }
+            ctx.restore();
+
+            // ── Centre reference line ──
+            const cy = height / 2;
+            ctx.save();
+            ctx.strokeStyle = 'rgba(255,255,255,0.10)';
+            ctx.lineWidth = 1;
+            ctx.setLineDash([4, 8]);
+            ctx.beginPath(); ctx.moveTo(0, cy); ctx.lineTo(width, cy); ctx.stroke();
+            ctx.setLineDash([]);
+            ctx.restore();
+
+            // ── Adaptive amplitude scale (95th-percentile peak, min 0.05) ──
+            const scale = Math.max(peakAbs * 1.1, 0.05);
+            const ampToY = v => cy - (Math.max(-1, Math.min(1, v / scale)) * cy * 0.88);
+
+            // ── Build path points ──
+            const step = data.length / width;
+            const pts = new Float32Array(width * 2);
+            for (let i = 0; i < width; i++) {
+                const idx = Math.floor(i * step);
+                pts[i * 2]     = i;
+                pts[i * 2 + 1] = ampToY(data[idx] || 0);
+            }
+
+            // ── Outer glow pass (wide, low alpha) ──
+            ctx.save();
+            ctx.shadowBlur = 0;
+            ctx.lineWidth  = 4;
+            ctx.strokeStyle = isClipping ? 'rgba(248,113,113,0.18)' : 'rgba(250,204,21,0.18)';
+            ctx.lineCap = 'round';
+            ctx.lineJoin = 'round';
+            ctx.beginPath();
+            ctx.moveTo(pts[0], pts[1]);
+            for (let i = 1; i < width; i++) ctx.lineTo(pts[i*2], pts[i*2+1]);
+            ctx.stroke();
+            ctx.restore();
+
+            // ── Inner sharp line with gradient stroke ──
+            ctx.save();
+            const grad = ctx.createLinearGradient(0, 0, width, 0);
+            if (isClipping) {
+                grad.addColorStop(0,   'rgba(248,113,113,0.95)');
+                grad.addColorStop(0.5, 'rgba(251,191,36,0.95)');
+                grad.addColorStop(1,   'rgba(248,113,113,0.95)');
+            } else {
+                grad.addColorStop(0,   'rgba(250,204,21,0.85)');
+                grad.addColorStop(0.5, 'rgba(134,239,172,0.95)');
+                grad.addColorStop(1,   'rgba(250,204,21,0.85)');
+            }
+            ctx.strokeStyle = grad;
+            ctx.lineWidth   = 1.6;
+            ctx.lineCap     = 'round';
+            ctx.lineJoin    = 'round';
+            ctx.beginPath();
+            ctx.moveTo(pts[0], pts[1]);
+            for (let i = 1; i < width; i++) ctx.lineTo(pts[i*2], pts[i*2+1]);
+            ctx.stroke();
+            ctx.restore();
+        }
+        
+        function updateCharts(fftDbArray, octaveData, filteredSignal) {
+            if (!fftChart) return;
+
+            // ── Build {x, y} points for linear FFT x-axis ──
+            const displayBins = fftDbArray.length;
+            const fftPoints = new Array(displayBins);
+            for (let i = 0; i < displayBins; i++) {
+                fftPoints[i] = { x: Math.round(i * FS / FFT_SIZE), y: fftDbArray[i] };
+            }
+
+            // ── Peak frequency detection ──
+            let bestBin = 0, bestDb = FFT_FLOOR_DB;
+            for (let i = 1; i < displayBins; i++) {
+                if (fftDbArray[i] > bestDb) { bestDb = fftDbArray[i]; bestBin = i; }
+            }
+            const rawPeakHz = bestBin * FS / FFT_SIZE;
+            if (bestDb > PEAK_MIN_DB) {
+                smoothedPeakHz = PEAK_SMOOTH * smoothedPeakHz + (1 - PEAK_SMOOTH) * rawPeakHz;
+                smoothedPeakDb = PEAK_SMOOTH * smoothedPeakDb + (1 - PEAK_SMOOTH) * bestDb;
+            }
+
+            // Update peak display
+            if (peakFreqDisplay && bestDb > PEAK_MIN_DB) {
+                const pHz = smoothedPeakHz;
+                peakFreqDisplay.textContent = pHz >= 1000
+                    ? (pHz / 1000).toFixed(2) + ' kHz'
+                    : Math.round(pHz) + ' Hz';
+                peakDbDisplay.textContent = smoothedPeakDb.toFixed(1) + ' dB';
+            }
+
+            // ── Push spectrum data + peak annotation to chart ──
+            fftChart.data.datasets[0].data = fftPoints;
+            // Peak marker dataset (index 1)
+            if (fftChart.data.datasets.length > 1 && bestDb > PEAK_MIN_DB) {
+                fftChart.data.datasets[1].data = [{ x: Math.round(smoothedPeakHz), y: smoothedPeakDb }];
+            }
+            fftChart.update('none');
+
+            // ── Octave chart (already relative-normalized from DSP) ──
+            octaveChart.data.labels = octaveData.bands.map(b =>
+                b >= 1000 ? (b / 1000) + ' kHz' : b + ' Hz'
+            );
+            octaveChart.data.datasets[0].data = octaveData.energies;
+            octaveChart.update('none');
+
+            // ── Waveform ──
+            const waveCanvas = document.getElementById('waveformCanvas');
+            drawWaveformFromArray(filteredSignal, waveformCtx, waveCanvas.width, waveCanvas.height);
+        }
+        
+        // ============================================================
+        // 6. CSV CAPTURE (fully frontend)
+        // ============================================================
+        function startCsvCapture() {
+            if (isCsvCapturing) return;
+            isCsvCapturing = true;
+            csvBuffer = [];
+            csvStartTime = performance.now();
+            csvSaveBtn.disabled = true;
+            csvSaveBtn.innerHTML = '<i class="fas fa-spinner fa-spin"></i> Capturing...';
+            csvStatus.classList.remove('hidden');
+            csvProgressWrap.classList.remove('hidden');
+            csvProgressBar.style.width = '0%';
+            csvStatus.innerText = '0.0 / 30.0 s';
+            if (csvTimer) clearInterval(csvTimer);
+            csvTimer = setInterval(() => {
+                if (!isCsvCapturing) return;
+                let elapsed = (performance.now() - csvStartTime) / 1000;
+                let pct = Math.min(100, (elapsed / CSV_DURATION) * 100);
+                csvStatus.innerText = `${elapsed.toFixed(1)} / ${CSV_DURATION}.0 s`;
+                csvProgressBar.style.width = pct + '%';
+                if (elapsed >= CSV_DURATION) finishCsvCapture();
+            }, 200);
+        }
+        
+        async function finishCsvCapture() {
+            if (!isCsvCapturing) return;
+            isCsvCapturing = false;
+            if (csvTimer) { clearInterval(csvTimer); csvTimer = null; }
+            const maxSamples = FS * CSV_DURATION;
+            if (csvBuffer.length > maxSamples) csvBuffer = csvBuffer.slice(0, maxSamples);
+            const actualDuration = csvBuffer.length / FS;
+            csvStatus.innerText = 'Saving...';
+            csvProgressBar.style.width = '100%';
+            
+            let csvRows = [['sample_index', 'time_seconds', 'amplitude']];
+            for (let i = 0; i < csvBuffer.length; i++) {
+                csvRows.push([i, (i / FS).toFixed(6), csvBuffer[i].toFixed(8)]);
+            }
+            let csvContent = csvRows.map(row => row.join(',')).join('\n');
+            const blob = new Blob([csvContent], { type: 'text/csv' });
+            const url = URL.createObjectURL(blob);
+            const a = document.createElement('a');
+            a.href = url;
+            a.download = `audio_capture_${Math.round(actualDuration)}s.csv`;
+            document.body.appendChild(a);
+            a.click();
+            document.body.removeChild(a);
+            URL.revokeObjectURL(url);
+            csvStatus.innerText = `✅ Saved! (${actualDuration.toFixed(1)}s, ${csvBuffer.length} samples)`;
+            setTimeout(() => {
+                csvSaveBtn.disabled = false;
+                csvSaveBtn.innerHTML = '<i class="fas fa-file-csv"></i> Save 30s CSV';
+                csvStatus.classList.add('hidden');
+                csvProgressWrap.classList.add('hidden');
+            }, 3000);
+            csvBuffer = [];
+        }
+        
+        // ============================================================
+        // 7. MICROPHONE INITIALIZATION (dynamic sample rate)
+        // ============================================================
+        async function initMicrophone() {
+            if (audioContext) await audioContext.close();
+            if (mediaStream) mediaStream.getTracks().forEach(t => t.stop());
+            try {
+                const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+                mediaStream = stream;
+                audioContext = new (window.AudioContext || window.webkitAudioContext)();
+                const sampleRate = audioContext.sampleRate;
+                initDSPWithSampleRate(sampleRate);
+                await audioContext.resume();
+                const source = audioContext.createMediaStreamSource(stream);
+                const processor = audioContext.createScriptProcessor(FFT_SIZE, 1, 1);
+                source.connect(processor);
+                processor.connect(audioContext.destination);
+                processor.onaudioprocess = (e) => {
+                    const inputData = e.inputBuffer.getChannelData(0);
+                    const chunkCopy = new Float32Array(inputData.length);
+                    chunkCopy.set(inputData);
+                    processChunk(chunkCopy);
+                };
+                modeBadge.innerHTML = `<i class="fas fa-microphone-alt mr-1"></i> Live @ ${sampleRate} Hz`;
+            } catch (err) {
+                console.error('Microphone error:', err);
+                modeBadge.innerHTML = '<i class="fas fa-exclamation-triangle mr-1"></i> Mic Error - check permissions';
+                modeBadge.classList.add('bg-red-900', 'text-red-200');
+            }
+        }
+        
+        // ============================================================
+        // 8. UI & CHARTS INITIALIZATION — Professional Config
+        // ============================================================
+        function initUI() {
+            // Grab HUD element refs
+            hudRms          = document.getElementById('hudRms');
+            hudPeak         = document.getElementById('hudPeak');
+            hudClip         = document.getElementById('hudClip');
+            peakFreqDisplay = document.getElementById('peakFreqDisplay');
+            peakDbDisplay   = document.getElementById('peakDbDisplay');
+
+            // ── FFT Spectrum Chart ──
+            const fftCtx = document.getElementById('fftCanvas').getContext('2d');
+
+            // Gradient fill under the spectrum line
+            const fftGradient = fftCtx.createLinearGradient(0, 0, 0, 280);
+            fftGradient.addColorStop(0,   'rgba(59, 130, 246, 0.28)');
+            fftGradient.addColorStop(0.6, 'rgba(59, 130, 246, 0.06)');
+            fftGradient.addColorStop(1,   'rgba(59, 130, 246, 0.00)');
+
+            fftChart = new Chart(fftCtx, {
+                type: 'line',
+                data: {
+                    labels: [],
+                    datasets: [
+                        {
+                            // Main spectrum line
+                            label: 'Magnitude (dB)',
+                            data: [],
+                            borderColor: '#3b82f6',
+                            backgroundColor: fftGradient,
+                            borderWidth: 1.5,
+                            fill: true,
+                            pointRadius: 0,
+                            tension: 0.25,
+                            order: 2
+                        },
+                        {
+                            // Peak marker point
+                            label: 'Peak',
+                            data: [],
+                            type: 'scatter',
+                            pointRadius: 6,
+                            pointHoverRadius: 8,
+                            pointBackgroundColor: '#facc15',
+                            pointBorderColor: '#fff',
+                            pointBorderWidth: 1.5,
+                            showLine: false,
+                            order: 1
+                        }
+                    ]
+                },
+                options: {
+                    responsive: true,
+                    maintainAspectRatio: true,
+                    animation: false,
+                    plugins: {
+                        legend: { display: false },
+                        tooltip: {
+                            callbacks: {
+                                label: ctx => {
+                                    const x = ctx.parsed.x;
+                                    const y = ctx.parsed.y;
+                                    const hz = x >= 1000 ? (x/1000).toFixed(2)+' kHz' : Math.round(x)+' Hz';
+                                    return `${hz}  ${y.toFixed(1)} dB`;
+                                }
+                            }
+                        }
+                    },
+                    scales: {
+                        x: {
+                            type: 'linear',
+                            min: 0,
+                            max: Math.min(FFT_DISPLAY_MAX_HZ, 20000),
+                            title: {
+                                display: true,
+                                text: 'Frequency',
+                                color: '#9ca3af',
+                                font: { size: 11 }
+                            },
+                            ticks: {
+                                color: '#6b7280',
+                                font: { size: 10 },
+                                maxTicksLimit: 14,
+                                // ── Engineering tick callback ──
+                                // Below 8 kHz: prefer 100 Hz spacing
+                                // At and above 8 kHz: prefer 2 kHz spacing
+                                callback: function(value, index, ticks) {
+                                    // Only show multiples of the appropriate step
+                                    const step = value < 8000 ? 1000 : 2000;
+                                    if (value % step !== 0) return '';
+                                    if (value === 0) return '0';
+                                    if (value % 1000 === 0) {
+                                        const k = value / 1000;
+                                        return Number.isInteger(k) ? k + 'k' : k.toFixed(1) + 'k';
+                                    }
+                                    return value;
+                                }
+                            },
+                            grid: {
+                                color: 'rgba(255,255,255,0.05)',
+                                drawTicks: true
+                            }
+                        },
+                        y: {
+                            min: FFT_FLOOR_DB,
+                            max: 0,
+                            title: {
+                                display: true,
+                                text: 'dBFS',
+                                color: '#9ca3af',
+                                font: { size: 11 }
+                            },
+                            ticks: {
+                                color: '#6b7280',
+                                font: { size: 10 },
+                                stepSize: 10,
+                                callback: value => value + ' dB'
+                            },
+                            grid: { color: 'rgba(255,255,255,0.05)' }
+                        }
+                    }
+                }
+            });
+            
+            // ── Octave Band Chart ──
+            const octCtx = document.getElementById('octaveCanvas').getContext('2d');
+            octaveChart = new Chart(octCtx, {
+                type: 'bar',
+                data: {
+                    labels: [],
+                    datasets: [{
+                        label: 'Relative Energy (dB)',
+                        data: [],
+                        backgroundColor: [
+                            'rgba(16, 185, 129, 0.85)',
+                            'rgba(34, 197, 94, 0.85)',
+                            'rgba(52, 211, 153, 0.85)',
+                            'rgba(59, 130, 246, 0.85)',
+                            'rgba(139, 92, 246, 0.85)',
+                            'rgba(236, 72, 153, 0.85)'
+                        ],
+                        borderColor: [
+                            '#10b981',
+                            '#22c55e',
+                            '#34d399',
+                            '#3b82f6',
+                            '#8b5cf6',
+                            '#ec4899'
+                        ],
+                        borderWidth: 1,
+                        borderRadius: 6,
+                        borderSkipped: false
+                    }]
+                },
+                options: {
+                    responsive: true,
+                    animation: false,
+                    plugins: {
+                        legend: { display: false }
+                    },
+                    scales: {
+                        x: {
+                            ticks: {
+                                color: '#9ca3af',
+                                font: { size: 11, weight: 'bold' }
+                            },
+                            grid: {
+                                display: false
+                            }
+                        },
+                        y: {
+                            min: OCTAVE_FLOOR_DB,
+                            max: 0,
+                            title: {
+                                display: true,
+                                text: 'Relative dB',
+                                color: '#9ca3af',
+                                font: { size: 11 }
+                            },
+                            ticks: {
+                                color: '#6b7280',
+                                font: { size: 10 },
+                                stepSize: 10,
+                                callback: function(value) { return value + ' dB'; }
+                            },
+                            grid: {
+                                color: 'rgba(255,255,255,0.05)'
+                            }
+                        }
+                    }
+                }
+            });
+            
+            // ── Waveform canvas ──
+            waveformCanvas = document.getElementById('waveformCanvas');
+            waveformCtx = waveformCanvas.getContext('2d');
+            waveformCtx.lineWidth = 1.8;
+            
+            // ── Spectrogram canvas ──
+            spectrogramCtx = document.getElementById('spectrogramCanvas').getContext('2d');
+            
+            // ── Event listeners ──
+            freqRangeSelect.addEventListener('change', (e) => {
+                currentFreqRange = e.target.value;
+                [currentLowHz, currentHighHz] = FREQ_RANGES[currentFreqRange];
+                let text = freqRangeSelect.options[freqRangeSelect.selectedIndex]?.text;
+                filterLabel.innerText = `(${text})`;
+                
+                // Update FFT x-axis max based on frequency range
+                const maxHz = currentFreqRange === 'full'
+                    ? Math.min(FS / 2, FFT_DISPLAY_MAX_HZ)
+                    : currentHighHz * 1.2;
+                fftChart.options.scales.x.max = maxHz;
+                fftChart.update();
+            });
+            csvSaveBtn.addEventListener('click', startCsvCapture);
+            
+            // Spectrogram update timer
+            setInterval(() => updateSpectrogramDisplay(), 1200);
+        }
+        
+        initUI();
+        initMicrophone();
+    </script>
+</body>
+</html>
